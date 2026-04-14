@@ -32,10 +32,13 @@ internal sealed class TrayApp : ApplicationContext
     {
         try
         {
+            Log("Initializing Copilot SDK...");
             await _engine.InitializeAsync();
+            Log("Copilot SDK initialized OK");
         }
         catch (Exception ex)
         {
+            Log("Copilot SDK init failed: " + ex);
             ShowBalloon("Copilot SDK init failed: " + ex.Message);
         }
     }
@@ -66,17 +69,27 @@ internal sealed class TrayApp : ApplicationContext
             NativeMethods.MOD_CONTROL | NativeMethods.MOD_SHIFT | NativeMethods.MOD_NOREPEAT,
             VK_R);
 
+        Log("RegisterHotKey result: " + ok);
         if (!ok)
             ShowBalloon("Hotkey Ctrl+Shift+R is in use by another app.");
     }
 
     internal void OnHotkeyPressed()
     {
-        _ = HandleHotkeyAsync();
+        _ = HandleHotkeyAsync().ContinueWith(t =>
+        {
+            if (t.Exception != null)
+            {
+                var msg = t.Exception.InnerException?.Message ?? t.Exception.Message;
+                Log("Unhandled error: " + msg);
+                ShowBalloon("Error: " + msg);
+            }
+        }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     private async Task HandleHotkeyAsync()
     {
+        Log("Hotkey pressed");
         if (_busy)
         {
             ShowBalloon("Rewrite already in progress.");
@@ -87,10 +100,13 @@ internal sealed class TrayApp : ApplicationContext
         try
         {
             ClipboardHelper.WaitForModifierRelease();
+            Log("Modifiers released");
 
             IntPtr targetHwnd = NativeMethods.GetForegroundWindow();
+            Log("Target HWND: " + targetHwnd);
 
             string? text = ClipboardHelper.CaptureSelection();
+            Log("Captured text: " + (text == null ? "null" : $"{text.Length} chars"));
             if (text == null)
             {
                 ShowBalloon("No text selected.");
@@ -98,6 +114,7 @@ internal sealed class TrayApp : ApplicationContext
             }
 
             var (mode, customInstruction) = await ShowRewriteMenuAsync();
+            Log("Menu result: " + (mode?.ToString() ?? "cancelled"));
             if (mode == null)
             {
                 ClipboardHelper.RestoreClipboard();
@@ -107,7 +124,9 @@ internal sealed class TrayApp : ApplicationContext
             string result;
             try
             {
+                Log("Calling Copilot SDK...");
                 result = await _engine.RewriteAsync(mode.Value, text, customInstruction);
+                Log("Rewrite result: " + result.Length + " chars");
             }
             catch (Exception ex)
             {
@@ -195,9 +214,24 @@ internal sealed class TrayApp : ApplicationContext
 
     private void ShowBalloon(string message)
     {
+        Log("Balloon: " + message);
         _trayIcon.BalloonTipTitle = AppName;
         _trayIcon.BalloonTipText = message;
         _trayIcon.ShowBalloonTip(3000);
+    }
+
+    private static readonly string LogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        AppName, "debug.log");
+
+    private static void Log(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+            File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     private static bool IsStartupEnabled()

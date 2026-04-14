@@ -66,26 +66,18 @@ internal static class NativeMethods
     public const ushort VK_V = 0x56;
     public const ushort VK_LCONTROL = 0xA2;
 
-    /// <summary>Send a key chord (e.g. Ctrl+C). Presses modifier, presses key, releases key, releases modifier.</summary>
+    // --- keybd_event (legacy but works better in RDP/remote sessions) ---
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    public const uint KEYEVENTF_KEYUP_32 = 0x0002;
+
+    /// <summary>Send a key chord using keybd_event (more reliable in RDP).</summary>
     public static void SendKeyChord(ushort modifier, ushort key)
     {
-        var inputs = new INPUT[4];
-        int size = Marshal.SizeOf<INPUT>();
-
-        inputs[0].Type = INPUT_KEYBOARD;
-        inputs[0].Union.Keyboard.VirtualKey = modifier;
-
-        inputs[1].Type = INPUT_KEYBOARD;
-        inputs[1].Union.Keyboard.VirtualKey = key;
-
-        inputs[2].Type = INPUT_KEYBOARD;
-        inputs[2].Union.Keyboard.VirtualKey = key;
-        inputs[2].Union.Keyboard.Flags = KEYEVENTF_KEYUP;
-
-        inputs[3].Type = INPUT_KEYBOARD;
-        inputs[3].Union.Keyboard.VirtualKey = modifier;
-        inputs[3].Union.Keyboard.Flags = KEYEVENTF_KEYUP;
-
-        SendInput((uint)inputs.Length, inputs, size);
+        keybd_event((byte)modifier, 0, 0, UIntPtr.Zero);              // modifier down
+        keybd_event((byte)key, 0, 0, UIntPtr.Zero);                   // key down
+        keybd_event((byte)key, 0, KEYEVENTF_KEYUP_32, UIntPtr.Zero);  // key up
+        keybd_event((byte)modifier, 0, KEYEVENTF_KEYUP_32, UIntPtr.Zero); // modifier up
     }
 }
