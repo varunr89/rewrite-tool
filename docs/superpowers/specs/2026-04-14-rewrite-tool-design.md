@@ -11,10 +11,10 @@ A lightweight Windows system tray application that rewrites selected text in any
 
 ## Goals
 
-- **Universal:** Works in any Windows app that supports Ctrl+C / Ctrl+V.
+- **Universal (best-effort):** Works in standard Windows desktop apps with editable text controls. Not guaranteed in elevated/admin apps, custom-rendered editors, or terminal emulators.
 - **Lightweight:** Single `.exe`, no installer, no dependencies on modern Windows.
 - **Simple:** Five rewrite presets + custom prompt. No settings UI, no config files.
-- **Robust:** Non-destructive — clipboard is saved/restored, failures are silent (tray notification only), Ctrl+Z always reverts.
+- **Robust:** Non-destructive — clipboard is saved/restored best-effort, failures surface as tray notifications. Paste is often undoable with Ctrl+Z depending on the target app.
 - **Shareable:** Zip and send. Or GitHub Release.
 
 ## Non-Goals
@@ -33,22 +33,29 @@ Single-process C# WinForms application. No visible windows. Tray icon + popup me
 ```
 1. User selects text in any application
 2. User presses Ctrl+Shift+R (global hotkey)
-3. App saves current clipboard contents
-4. App simulates Ctrl+C to capture selection
-5. App reads clipboard (plain text)
-6. If clipboard is empty → show tray notification "No text selected" → restore clipboard → stop
-7. App shows ContextMenuStrip at cursor position:
-   - Fix grammar
-   - Make professional
-   - Make concise
-   - Expand
-   - ───────────── (separator)
-   - Custom...
-8. User clicks an option (or presses Escape to cancel → restore clipboard → stop)
-9. For "Custom...": show simple InputBox dialog for the instruction
-10. App calls Copilot SDK with system prompt + selected text
-11. On success: write rewritten text to clipboard → simulate Ctrl+V → done
-12. On failure: show tray notification with error → restore clipboard → stop
+3. App checks reentrancy guard — if rewrite already in progress, show "Rewrite in progress" toast → stop
+4. App saves current clipboard contents (text format)
+5. App waits for modifier keys (Ctrl, Shift) to be released (poll GetAsyncKeyState)
+6. App records foreground HWND via GetForegroundWindow()
+7. App simulates Ctrl+C via SendInput
+8. App polls GetClipboardSequenceNumber() until it changes or timeout (~2s)
+9. App reads clipboard (plain text)
+10. If clipboard is empty → show tray notification "No text selected" → restore clipboard → stop
+11. App shows ContextMenuStrip at Cursor.Position:
+    - Fix grammar
+    - Make professional
+    - Make concise
+    - Expand
+    - ───────────── (separator)
+    - Custom...
+12. User clicks an option (or presses Escape to cancel → restore clipboard → stop)
+13. For "Custom...": show simple InputBox dialog for the instruction
+14. App calls Copilot SDK with system prompt + captured text (async await)
+15. On success:
+    a. Check if original HWND is still foreground (GetForegroundWindow() == savedHwnd)
+    b. If YES: write rewritten text to clipboard → simulate Ctrl+V via SendInput → done
+    c. If NO: write rewritten text to clipboard → show toast "Rewrite ready — paste with Ctrl+V" → done
+16. On failure: show tray notification with error → restore clipboard → stop
 ```
 
 ### Clipboard Safety
@@ -61,7 +68,15 @@ The clipboard is treated as a shared resource that belongs to the user:
 
 ### Undo
 
-Most Windows text controls support Ctrl+Z which will undo the paste operation, restoring the original text. This is inherent to the target app — RewriteTool doesn't need to implement undo.
+Most Windows text controls support Ctrl+Z which will undo the paste operation. This is inherent to the target app — RewriteTool doesn't need to implement undo. Not all apps guarantee undo (e.g., web forms, custom controls).
+
+### Reentrancy Guard
+
+A boolean or `SemaphoreSlim(1,1)` prevents overlapping rewrite operations. If the hotkey is pressed while a rewrite is in progress, a tray notification says "Rewrite already in progress" and the new request is ignored.
+
+### Focus Safety
+
+The foreground window HWND is captured early (step 6) and verified before paste (step 15). If the user alt-tabs during the async SDK call, the tool skips auto-paste and leaves the result on the clipboard with a toast notification. This prevents pasting into the wrong application.
 
 ## Components
 
@@ -87,31 +102,42 @@ RewriteTool/
 - Creates a `NotifyIcon` with a basic context menu (right-click tray icon: "About", "Start with Windows", "Exit").
 - Registers global hotkey `Ctrl+Shift+R` via Win32 `RegisterHotKey` P/Invoke.
 - On hotkey trigger:
-  1. Calls `ClipboardHelper.CaptureSelection()` to save clipboard + simulate Ctrl+C.
-  2. If no text captured, shows balloon notification and returns.
-  3. Creates a `ContextMenuStrip` with the 5 preset items + "Custom...".
-  4. Shows the menu at `Cursor.Position`.
-  5. On menu item click, calls `RewriteEngine.RewriteAsync(mode, text)`.
-  6. On result, calls `ClipboardHelper.PasteResult(result)`.
+  1. Checks reentrancy guard — if busy, shows "Rewrite in progress" toast and returns.
+  2. Sets reentrancy guard.
+  3. Calls `ClipboardHelper.WaitForModifierRelease()`.
+  4. Records foreground HWND via `GetForegroundWindow()` P/Invoke.
+  5. Calls `ClipboardHelper.CaptureSelection()` to save clipboard + simulate Ctrl+C.
+  6. If no text captured, shows balloon notification and returns.
+  7. Creates a `ContextMenuStrip` with the 5 preset items + "Custom...".
+  8. Shows the menu at `Cursor.Position`.
+  9. On menu item click, calls `RewriteEngine.RewriteAsync(mode, text)`.
+  10. On result, checks if saved HWND is still foreground:
+      - If yes: calls `ClipboardHelper.PasteResult(result)`.
+      - If no: sets clipboard to result, shows toast "Rewrite ready — paste with Ctrl+V".
+  11. Clears reentrancy guard.
 - Unregisters hotkey on dispose.
 
 ### ClipboardHelper.cs
 
 - `CaptureSelection() → string?`
   - Saves current clipboard contents via `Clipboard.GetDataObject()`.
-  - Clears clipboard.
-  - Sends `Ctrl+C` via `SendKeys.SendWait("^c")` or `SendInput` P/Invoke.
-  - Waits ~150ms for clipboard to populate.
+  - Records `GetClipboardSequenceNumber()`.
+  - Sends `Ctrl+C` via `SendInput` P/Invoke (key down/up for Ctrl, then C).
+  - Polls `GetClipboardSequenceNumber()` until it changes, with retry up to ~2s.
   - Reads `Clipboard.GetText()`.
   - If empty, restores saved clipboard and returns null.
   - Returns the captured text.
 - `PasteResult(string text)`
   - Sets clipboard to the rewritten text.
-  - Sends `Ctrl+V` via `SendKeys.SendWait("^v")`.
+  - Sends `Ctrl+V` via `SendInput` P/Invoke.
 - `RestoreClipboard()`
   - Restores previously saved clipboard data.
+- `WaitForModifierRelease()`
+  - Polls `GetAsyncKeyState` for Ctrl, Shift, Alt keys.
+  - Waits until all modifier keys are released (max ~500ms).
+  - Prevents hotkey modifiers from leaking into the simulated Ctrl+C.
 
-**Note:** `SendKeys` may not work reliably in all apps (especially elevated/UWP). If issues arise, fall back to `SendInput` Win32 API which is more reliable.
+**Input injection:** Uses `SendInput` exclusively (not `SendKeys`). `SendInput` is lower-level, gives explicit key down/up control, and is more reliable across app types. Note: `SendInput` still cannot inject into elevated processes (UIPI boundary).
 
 ### RewriteEngine.cs
 
@@ -172,6 +198,8 @@ All errors surface as tray balloon notifications. The app never shows modal dial
 | SDK call fails (network, timeout) | Balloon: "Rewrite failed: {error}" |
 | Hotkey already registered | Balloon on startup: "Hotkey Ctrl+Shift+R is in use by another app" |
 | User cancels menu (Escape/click away) | Restore clipboard silently |
+| Rewrite already in progress | Balloon: "Rewrite already in progress" |
+| User switched apps during rewrite | Clipboard set to result, balloon: "Rewrite ready — paste with Ctrl+V" |
 
 ## Distribution
 
@@ -186,7 +214,7 @@ All errors surface as tray balloon notifications. The app never shows modal dial
 - .NET 8 / C# 12
 - WinForms (for `NotifyIcon`, `ContextMenuStrip`, message loop)
 - GitHub.Copilot.SDK NuGet package
-- Win32 P/Invoke: `RegisterHotKey`, `UnregisterHotKey`, `SendInput`
+- Win32 P/Invoke: `RegisterHotKey`, `UnregisterHotKey`, `SendInput`, `GetForegroundWindow`, `GetAsyncKeyState`, `GetClipboardSequenceNumber`
 - No other dependencies
 
 ## Open Questions
