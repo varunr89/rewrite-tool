@@ -12,6 +12,8 @@ static class Program
             return; // Another instance is running
 
         ApplicationConfiguration.Initialize();
-        // Application.Run(new TrayApp()); // Added in Task 5
+        var app = new TrayApp();
+        app.RegisterHotkey();
+        Application.Run(app);
     }
 }

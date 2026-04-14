@@ -1,4 +1,4 @@
-using GitHub.CopilotSdk;
+using GitHub.Copilot.SDK;
 
 namespace RewriteTool;
 
@@ -48,7 +48,7 @@ internal sealed class RewriteEngine : IAsyncDisposable
             {
                 done.TrySetResult();
             }
-            else if (evt is ErrorEvent err)
+            else if (evt is SessionErrorEvent err)
             {
                 done.TrySetException(new Exception(err.Data?.Message ?? "Copilot SDK error"));
             }
