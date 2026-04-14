@@ -20,6 +20,90 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    // --- System cursor ---
+    [DllImport("user32.dll")]
+    public static extern bool SetSystemCursor(IntPtr hcur, uint id);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr LoadCursor(IntPtr hInstance, int lpCursorName);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr CopyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+
+    public const uint OCR_NORMAL = 32512;
+    public const int IDC_APPSTARTING = 32650; // arrow + hourglass
+    public const uint SPI_SETCURSORS = 0x0057;
+
+    /// <summary>Set system cursor to the Copilot logo.</summary>
+    public static void SetBusyCursor()
+    {
+        var hCursor = CreateCopilotCursor();
+        if (hCursor != IntPtr.Zero)
+            SetSystemCursor(hCursor, OCR_NORMAL);
+    }
+
+    /// <summary>Restore default system cursors.</summary>
+    public static void RestoreCursor()
+    {
+        SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CreateIconIndirect(ref ICONINFO piconinfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ICONINFO
+    {
+        public bool fIcon;
+        public int xHotspot;
+        public int yHotspot;
+        public IntPtr hbmMask;
+        public IntPtr hbmColor;
+    }
+
+    /// <summary>Loads the Copilot icon from embedded resources and converts to a cursor.</summary>
+    private static IntPtr CreateCopilotCursor()
+    {
+        try
+        {
+            // Load icon from embedded resource
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            using var stream = asm.GetManifestResourceStream("RewriteTool.copilot.ico");
+            if (stream == null)
+            {
+                // Fallback to system busy cursor
+                return CopyIcon(LoadCursor(IntPtr.Zero, IDC_APPSTARTING));
+            }
+
+            using var icon = new Icon(stream, 32, 32);
+            using var bmp = icon.ToBitmap();
+
+            // Create mask
+            using var mask = new Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format1bppIndexed);
+
+            var info = new ICONINFO
+            {
+                fIcon = false, // cursor, not icon
+                xHotspot = 0,
+                yHotspot = 0,
+                hbmMask = mask.GetHbitmap(),
+                hbmColor = bmp.GetHbitmap(),
+            };
+
+            return CreateIconIndirect(ref info);
+        }
+        catch
+        {
+            return CopyIcon(LoadCursor(IntPtr.Zero, IDC_APPSTARTING));
+        }
+    }
+
     // --- Keyboard state ---
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);

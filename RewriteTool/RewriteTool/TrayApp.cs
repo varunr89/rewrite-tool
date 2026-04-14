@@ -19,7 +19,7 @@ internal sealed class TrayApp : ApplicationContext
 
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = LoadCopilotIcon(),
             Text = AppName,
             Visible = true,
             ContextMenuStrip = BuildTrayMenu(),
@@ -35,6 +35,7 @@ internal sealed class TrayApp : ApplicationContext
             Log("Initializing Copilot SDK...");
             await _engine.InitializeAsync();
             Log("Copilot SDK initialized OK");
+            RebuildTrayMenu();
         }
         catch (Exception ex)
         {
@@ -46,6 +47,32 @@ internal sealed class TrayApp : ApplicationContext
     private ContextMenuStrip BuildTrayMenu()
     {
         var menu = new ContextMenuStrip();
+
+        // Model submenu — populated after SDK init
+        var modelMenu = new ToolStripMenuItem("Model");
+        if (_engine.AvailableModels.Count > 0)
+        {
+            foreach (var model in _engine.AvailableModels)
+            {
+                var item = new ToolStripMenuItem(model);
+                item.Checked = model == _engine.SelectedModel;
+                item.Click += (_, _) =>
+                {
+                    _engine.SetModel(model);
+                    RebuildTrayMenu();
+                    ShowBalloon($"Model: {model}");
+                };
+                modelMenu.DropDownItems.Add(item);
+            }
+        }
+        else
+        {
+            modelMenu.DropDownItems.Add(new ToolStripMenuItem("(loading...)") { Enabled = false });
+        }
+        menu.Items.Add(modelMenu);
+
+        menu.Items.Add(new ToolStripSeparator());
+
         var startWithWindows = new ToolStripMenuItem("Start with Windows");
         startWithWindows.Checked = IsStartupEnabled();
         startWithWindows.Click += (_, _) =>
@@ -57,6 +84,11 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         return menu;
+    }
+
+    private void RebuildTrayMenu()
+    {
+        _trayIcon.ContextMenuStrip = BuildTrayMenu();
     }
 
     private HotkeyWindow? _hotkeyWindow;
@@ -125,6 +157,7 @@ internal sealed class TrayApp : ApplicationContext
             try
             {
                 Log("Calling Copilot SDK...");
+                NativeMethods.SetBusyCursor();
                 result = await _engine.RewriteAsync(mode.Value, text, customInstruction);
                 Log("Rewrite result: " + result.Length + " chars");
             }
@@ -134,17 +167,15 @@ internal sealed class TrayApp : ApplicationContext
                 ClipboardHelper.RestoreClipboard();
                 return;
             }
+            finally
+            {
+                NativeMethods.RestoreCursor();
+            }
 
-            IntPtr currentFg = NativeMethods.GetForegroundWindow();
-            if (currentFg == targetHwnd)
-            {
-                ClipboardHelper.PasteResult(result);
-            }
-            else
-            {
-                ClipboardHelper.SetClipboardOnly(result);
-                ShowBalloon("Rewrite ready — paste with Ctrl+V.");
-            }
+            // Re-focus original window and paste
+            NativeMethods.SetForegroundWindow(targetHwnd);
+            Thread.Sleep(200);
+            ClipboardHelper.PasteResult(result);
         }
         finally
         {
@@ -176,14 +207,26 @@ internal sealed class TrayApp : ApplicationContext
                 tcs.TrySetResult((null, null));
         });
 
-        menu.Closed += (_, _) =>
+        menu.Closed += (_, e) =>
         {
-            tcs.TrySetResult((null, null));
+            // Only treat as cancel if user clicked away, not if an item was selected
+            // Small delay to let item click handlers fire first
+            Task.Delay(100).ContinueWith(_ => tcs.TrySetResult((null, null)));
         };
 
-        menu.Show(Cursor.Position);
+        // Show via NotifyIcon's internal ShowContextMenu which handles focus properly
+        _trayIcon.ContextMenuStrip = menu;
+        var mi = typeof(NotifyIcon).GetMethod("ShowContextMenu",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        mi?.Invoke(_trayIcon, null);
+
+        // Restore tray menu after selection
+        tcs.Task.ContinueWith(_ => RebuildTrayMenu());
+
         return tcs.Task;
     }
+
+    private static bool InvokeRequired() => false; // Simplification — we're always on the UI thread
 
     private static string? ShowCustomPromptDialog()
     {
@@ -210,6 +253,19 @@ internal sealed class TrayApp : ApplicationContext
         return form.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(textBox.Text)
             ? textBox.Text.Trim()
             : null;
+    }
+
+    private static Icon LoadCopilotIcon()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var stream = asm.GetManifestResourceStream("RewriteTool.copilot.ico");
+            if (stream != null)
+                return new Icon(stream, 32, 32);
+        }
+        catch { }
+        return SystemIcons.Application;
     }
 
     private void ShowBalloon(string message)

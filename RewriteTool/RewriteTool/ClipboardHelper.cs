@@ -45,12 +45,30 @@ internal static class ClipboardHelper
         {
             uint seqNow = NativeMethods.GetClipboardSequenceNumber();
             if (seqNow != seqBefore)
+            {
+                // Clipboard changed — wait a bit for all formats to be populated
+                Thread.Sleep(150);
                 break;
+            }
             Thread.Sleep(20);
         }
 
-        // Read text
-        string text = Clipboard.GetText();
+        // Try multiple text formats
+        string text = Clipboard.GetText(TextDataFormat.UnicodeText);
+        if (string.IsNullOrEmpty(text))
+            text = Clipboard.GetText(TextDataFormat.Text);
+        if (string.IsNullOrEmpty(text))
+            text = Clipboard.GetText();
+
+        // Log available formats for diagnostics
+        var data = Clipboard.GetDataObject();
+        if (data != null)
+        {
+            var formats = data.GetFormats();
+            Log("Clipboard formats: " + string.Join(", ", formats));
+            Log("Text result: " + (text == null ? "null" : $"'{text.Substring(0, Math.Min(text.Length, 50))}'"));
+        }
+
         if (string.IsNullOrEmpty(text))
         {
             RestoreClipboard();
@@ -58,6 +76,19 @@ internal static class ClipboardHelper
         }
 
         return text;
+    }
+
+    private static void Log(string message)
+    {
+        try
+        {
+            var logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "RewriteTool", "debug.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss.fff}] [Clipboard] {message}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     /// <summary>
@@ -86,7 +117,14 @@ internal static class ClipboardHelper
     {
         if (_savedClipboard != null)
         {
-            Clipboard.SetDataObject(_savedClipboard, true);
+            try
+            {
+                Clipboard.SetDataObject(_savedClipboard, true);
+            }
+            catch
+            {
+                // Clipboard may be locked by another app — silently fail
+            }
             _savedClipboard = null;
         }
     }
